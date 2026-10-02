@@ -353,7 +353,10 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
   };
 
   /* ---------- 기록 (이 기기 안에만 저장) ---------- */
-  function loadHist(){ try{ return JSON.parse(localStorage.getItem(KEY)||'[]'); }catch(_){ return []; } }
+  function loadHist(){
+    var a; try{ a=JSON.parse(localStorage.getItem(KEY)||'[]'); }catch(_){ return []; }
+    return a.map(function(it){ if(!TYPES[it.type]) it.type = it.type==='meeting' ? 'lecture' : 'bni'; return it; });
+  }
   function storeHist(a){ try{ localStorage.setItem(KEY, JSON.stringify(a.slice(0,50))); }catch(_){} }
   function saveHistory(result){
     var a=loadHist();
