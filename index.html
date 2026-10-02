@@ -461,19 +461,17 @@ select{font:inherit;font-size:15px;color:var(--ink);background:var(--card);borde
       if(ent.type==='mp4a'){
         var es=kid(d,{s:cs,e:ent.e},'esds');
         if(!es){ var wave=kid(d,{s:cs,e:ent.e},'wave'); if(wave) es=kid(d,wave,'esds'); }
-        if(!es) throw new Error('지원하지 않는 M4A 형식이에요.');
-        var o={p:es.s+4};
-        while(o.p<es.e){
+        var o={p:es?es.s+4:ent.e};
+        while(es && o.p<es.e){
           var tag=d.getUint8(o.p++), n=descLen(d,o);
           if(tag===3){ var fl=d.getUint8(o.p+2); o.p+=3; if(fl&0x80) o.p+=2; if(fl&0x40) o.p+=1+d.getUint8(o.p); if(fl&0x20) o.p+=2; }
           else if(tag===4){ o.p+=13; }
           else if(tag===5){ desc=new Uint8Array(d.buffer.slice(o.p,o.p+n)); break; }
           else o.p+=n;
         }
-        if(!desc) throw new Error('지원하지 않는 M4A 형식이에요.');
-        codec='mp4a.40.'+(desc[0]>>3);
+        if(desc) codec='mp4a.40.'+(desc[0]>>3);
       } else if(ent.type==='Opus'){ codec='opus'; if(!sr) sr=48000; }
-      else throw new Error('지원하지 않는 오디오 코덱('+ent.type+')이에요.');
+
       var stsz=kid(d,stbl,'stsz'), fixed=d.getUint32(stsz.s+4), cnt=d.getUint32(stsz.s+8), sizes=new Uint32Array(cnt);
       for(var i=0;i<cnt;i++) sizes[i]=fixed||d.getUint32(stsz.s+12+i*4);
       var co=kid(d,stbl,'stco'), big=false; if(!co){ co=kid(d,stbl,'co64'); big=true; }
@@ -487,12 +485,96 @@ select{font:inherit;font-size:15px;color:var(--ink);background:var(--card);borde
         var per=0; for(var e2=0;e2<sc.length && sc[e2][0]<=c+1;e2++) per=sc[e2][1];
         var p=offs[c]; for(var k=0;k<per && si<cnt;k++){ pos[si]=p; p+=sizes[si]; si++; }
       }
-      return {codec:codec, desc:desc, sr:sr||44100, ch:ch||1, secs:dur/ts, sizes:sizes, pos:pos, count:si};
+      var stts=kid(d,stbl,'stts'), deltas=new Uint32Array(cnt), q=0, nt=d.getUint32(stts.s+4);
+      for(i=0;i<nt && q<cnt;i++){ var rc=d.getUint32(stts.s+8+i*8), dl=d.getUint32(stts.s+12+i*8); for(k=0;k<rc && q<cnt;k++) deltas[q++]=dl; }
+      var raw=new Uint8Array(d.buffer.slice(stsd.s+8, ent.e));
+      return {type:ent.type, codec:codec, desc:desc, sr:sr||44100, ch:ch||1, ts:ts, secs:dur/ts, sizes:sizes, pos:pos, deltas:deltas, raw:raw, count:si};
     }
     return null;
   }
 
+  /* 원본 M4A의 프레임 i~j를 담은 작은 M4A 파일을 만듦 (해독 방식은 브라우저에 맡김: ALAC 무손실 등) */
+  function buildMp4(info, i, j, data){
+    function u32(n){ return [(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255]; }
+    function str(t){ return [t.charCodeAt(0),t.charCodeAt(1),t.charCodeAt(2),t.charCodeAt(3)]; }
+    function bx(t){ var parts=[].slice.call(arguments,1), body=[]; parts.forEach(function(p){ for(var k=0;k<p.length;k++) body.push(p[k]); });
+      return u32(8+body.length).concat(str(t), body); }
+    var dur=0, runs=[], k; for(k=i;k<j;k++){ dur+=info.deltas[k]; var r=runs[runs.length-1]; if(r && r[1]===info.deltas[k]) r[0]++; else runs.push([1,info.deltas[k]]); }
+    var M=[].concat(u32(0x00010000),u32(0),u32(0),u32(0),u32(0x00010000),u32(0),u32(0),u32(0),u32(0x40000000));
+    var z=function(n){ return new Array(n).fill(0); };
+    var stts=[].concat(u32(0),u32(runs.length)); runs.forEach(function(r){ stts.push.apply(stts,u32(r[0])); stts.push.apply(stts,u32(r[1])); });
+    var stsz=[].concat(u32(0),u32(0),u32(j-i)); for(k=i;k<j;k++) stsz.push.apply(stsz,u32(info.sizes[k]));
+    function moov(off){
+      return bx('moov',
+        bx('mvhd', u32(0),u32(0),u32(0),u32(info.ts),u32(dur),u32(0x00010000),[1,0],z(10),M,z(24),u32(2)),
+        bx('trak',
+          bx('tkhd', u32(3),u32(0),u32(0),u32(1),u32(0),u32(dur),z(8),[0,0,0,0,1,0,0,0],M,u32(0),u32(0)),
+          bx('mdia',
+            bx('mdhd', u32(0),u32(0),u32(0),u32(info.ts),u32(dur),[0x55,0xc4,0,0]),
+            bx('hdlr', u32(0),u32(0),str('soun'),z(12),[0]),
+            bx('minf',
+              bx('smhd', u32(0),u32(0)),
+              bx('dinf', bx('dref', u32(0),u32(1), bx('url ', u32(1)))),
+              bx('stbl',
+                bx('stsd', u32(0),u32(1), Array.from(info.raw)),
+                bx('stts', stts),
+                bx('stsc', u32(0),u32(1),u32(1),u32(j-i),u32(1)),
+                bx('stsz', stsz),
+                bx('stco', u32(0),u32(1),u32(off)))))));
+    }
+    var ftyp=bx('ftyp', str('M4A '),u32(0),str('M4A '),str('mp42'),str('isom'));
+    var mv=moov(0); mv=moov(ftyp.length+mv.length+8);
+    var out=new Uint8Array(ftyp.length+mv.length+8+data.length);
+    out.set(ftyp,0); out.set(mv,ftyp.length);
+    out.set(u32(8+data.length).concat(str('mdat')), ftyp.length+mv.length);
+    out.set(data, ftyp.length+mv.length+8);
+    return out;
+  }
+  function decodeBuf(ctx, buf){
+    return new Promise(function(res,rej){ var p=ctx.decodeAudioData(buf,res,rej); if(p&&p.then) p.then(res,rej); });
+  }
+  async function readFrames(f, info, i, j, bytes){
+    var data=new Uint8Array(bytes), o=0, k=i;
+    while(k<j){   // 이어진 프레임은 한 번에 읽음
+      var a=info.pos[k], e=a+info.sizes[k], m=k+1;
+      while(m<j && info.pos[m]===e){ e+=info.sizes[m]; m++; }
+      data.set(new Uint8Array(await f.slice(a,e).arrayBuffer()), o); o+=e-a; k=m;
+    }
+    return data;
+  }
+  // 브라우저가 못 푸는 형식(예: 안드로이드 크롬의 ALAC): 작은 M4A로 잘라 그대로 OpenAI에 보냄
+  async function pieceSendOpenAI(f, info, key, onPiece){
+    var MAXB=20*1048576, MAXT=600*info.ts, i=0;
+    while(i<info.count){
+      if(aCancel) throw new Error('멈춤');
+      var j=i, bytes=0, t=0;
+      while(j<info.count && (j===i || (bytes+info.sizes[j]<=MAXB && t<MAXT))){ bytes+=info.sizes[j]; t+=info.deltas[j]; j++; }
+      var blob=new Blob([buildMp4(info,i,j,await readFrames(f,info,i,j,bytes))],{type:'audio/mp4'});
+      await onPiece(blob, t/info.ts, j/info.count);
+      i=j;
+    }
+  }
+  async function pieceMp4(f, info, seg, onRead){
+    var OAC=window.OfflineAudioContext||window.webkitOfflineAudioContext, ctx, rs=null;
+    try{ ctx=new OAC(1,1,SR16); }catch(_){ ctx=new OAC(1,1,44100); rs=Resampler(44100); }
+    var MAXB=8*1048576, MAXT=120*info.ts, i=0;
+    while(i<info.count){
+      if(aCancel) throw new Error('멈춤');
+      var j=i, bytes=0, t=0;
+      while(j<info.count && (j===i || (bytes+info.sizes[j]<=MAXB && t<MAXT))){ bytes+=info.sizes[j]; t+=info.deltas[j]; j++; }
+      var data=await readFrames(f,info,i,j,bytes);
+      var ab=await decodeBuf(ctx, buildMp4(info,i,j,data).buffer);
+      var n=ab.length, ch=ab.numberOfChannels, mono=new Float32Array(n);
+      for(var c=0;c<ch;c++){ var dd=ab.getChannelData(c); for(var x=0;x<n;x++) mono[x]+=dd[x]/ch; }
+      if(rs || ab.sampleRate!==SR16){ if(!rs) rs=Resampler(ab.sampleRate); mono=rs(mono); }
+      seg.push(mono); await seg.drain(); onRead(j/info.count);
+      i=j;
+    }
+    await seg.end();
+  }
+
   async function streamMp4(f, info, seg, onRead){
+    if(!info.codec || !window.AudioDecoder) return false;
     var rs=null, err=null, frameUs=1024*1e6/info.sr;
     var dec=new AudioDecoder({
       output:function(ad){
@@ -613,7 +695,7 @@ select{font:inherit;font-size:15px;color:var(--ink);background:var(--card);borde
   var prevText='';
   async function openaiSeg(seg, key){
     var fd=new FormData();
-    fd.append('file', toWav(seg), 'part.wav');
+    if(seg instanceof Blob) fd.append('file', seg, 'part.m4a'); else fd.append('file', toWav(seg), 'part.wav');
     fd.append('model','gpt-4o-transcribe');
     fd.append('language','ko');
     if(prevText) fd.append('prompt', prevText.slice(-200));
@@ -664,15 +746,29 @@ select{font:inherit;font-size:15px;color:var(--ink);background:var(--card);borde
       });
       status();
       var ok=false;
-      if(info && window.AudioDecoder) ok=await streamMp4(audioFile, info, seg, function(fr){ readFrac=fr; });
-      if(!ok){ await decodeWhole(audioFile, seg); total=total||doneSecs; }
+      var onRead=function(fr){ readFrac=fr; };
+      if(info) ok=await streamMp4(audioFile, info, seg, onRead);
+      if(!ok && info){
+        try{ await pieceMp4(audioFile, info, seg, onRead); ok=true; }
+        catch(e){
+          if(e&&e.message==='멈춤') throw e;
+          if(eng!=='openai'){ if(info.type==='alac') throw new Error('ALAC'); throw e; }
+          // 이 브라우저가 못 푸는 형식 → 잘라서 그대로 OpenAI로
+          await pieceSendOpenAI(audioFile, info, key, async function(blob, secs, fr){
+            readFrac=fr; status(); appendLine(await openaiSeg(blob,key)); nSeg++; doneSecs+=secs; status();
+          });
+          ok=true;
+        }
+      }
+      if(!ok) await decodeWhole(audioFile, seg);
       total=doneSecs;
       aProgress(1,'다 바꿨어요 · 녹음 '+Math.round(total/60)+'분');
       aSay('변환이 끝났어요. 잘못 들린 글자를 고친 뒤 정리하기를 누르세요.');
       $('transcript').scrollIntoView({behavior:'smooth',block:'center'});
     }catch(err){
       var m=err&&err.message||'';
-      if(m==='TOO_BIG') aSay('이 휴대폰 브라우저로는 큰 녹음 파일을 나눠 읽을 수 없어요. 크롬 최신 버전으로 열거나 PC에서 해 주세요.',true);
+      if(m==='ALAC') aSay('무손실(ALAC) 녹음은 이 브라우저에서 열 수 없어요. 아이폰이면 사파리로 열거나, 빠른 변환(OpenAI)을 골라 주세요. 앞으로는 음성 메모 음질을 "압축"으로 바꾸면 파일이 약 10분의 1로 줄어요.',true);
+      else if(m==='TOO_BIG') aSay('이 휴대폰 브라우저로는 큰 녹음 파일을 나눠 읽을 수 없어요. 크롬 최신 버전으로 열거나 PC에서 해 주세요.',true);
       else if(m==='멈춤'||(err&&err.name==='AbortError')) aSay('멈췄어요. 여기까지 바뀐 글은 대화 내용 칸에 남아 있어요.');
       else if(/decode|Decoding|EncodingError|Unable to decode/i.test(m)||(err&&err.name==='EncodingError')) aSay('이 녹음 파일을 열지 못했어요. 크롬이나 사파리 최신 버전에서 다시 해 보세요.',true);
       else if(/memory|allocation|Array buffer/i.test(m)) aSay('녹음이 길어서 이 기기 메모리가 부족해요. PC에서 하거나 빠른 변환(OpenAI)을 써 보세요.',true);
