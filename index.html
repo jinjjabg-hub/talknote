@@ -364,12 +364,17 @@ select{font:inherit;font-size:15px;color:var(--ink);background:var(--card);borde
 
   /* ---------- 녹음 파일 → 글 ---------- */
   var pendingReject=null, SR16=16000, audioFile=null, aBusy=false, aCancel=false, worker=null, workerModel=null, aCtrl=null;
-  var KEYSTORE='conv-notes-openai-key';
+  var KEYSTORE='conv-notes-openai-key', BUSYKEY='conv-notes-audio-busy';
+  (function(){
+    var was=null; try{ was=localStorage.getItem(BUSYKEY); localStorage.removeItem(BUSYKEY); }catch(_){}
+    if(was) setTimeout(function(){ say('지난번 "'+was+'" 변환 중에 앱이 닫혔어요. 그때까지 바뀐 글은 대화 내용 칸에 남아 있어요. 휴대폰이라면 빠른 변환(OpenAI)을 써 보세요.',true); },0);
+  })();
   function aSay(t,err){ show($('aMsg'),t,err); }
   function aProgress(frac, text){ $('aProg').hidden=false; $('aBar').style.width=Math.round(frac*100)+'%'; $('aStat').textContent=text; }
   function engine(){ return document.querySelector('input[name=eng]:checked').value; }
   function syncEngine(){ var o=engine()==='openai'; $('keyOpts').hidden=!o; $('localOpts').hidden=o; }
   Array.prototype.forEach.call(document.querySelectorAll('input[name=eng]'),function(r){ r.onchange=syncEngine; });
+  if(/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent)){ document.querySelector('input[name=eng][value=openai]').checked=true; syncEngine(); }
   try{ var k0=localStorage.getItem(KEYSTORE); if(k0){ $('apiKey').value=k0; $('keySave').checked=true; } }catch(_){}
 
   function pickAudio(f){
@@ -378,38 +383,165 @@ select{font:inherit;font-size:15px;color:var(--ink);background:var(--card);borde
     $('audio').scrollIntoView({behavior:'smooth',block:'center'});
   }
 
-  // 녹음 파일을 16kHz 모노 숫자 배열로 풀기
-  async function decodeAudio(f){
-    var buf=await f.arrayBuffer(), ab;
-    var AC=window.AudioContext||window.webkitAudioContext;
-    try{ var c=new AC({sampleRate:SR16}); ab=await c.decodeAudioData(buf.slice(0)); c.close&&c.close(); }
-    catch(_){ var c2=new AC(); ab=await c2.decodeAudioData(buf); c2.close&&c2.close(); }
-    if(ab.sampleRate!==SR16){
-      var off=new OfflineAudioContext(1, Math.ceil(ab.duration*SR16), SR16);
-      var src=off.createBufferSource(); src.buffer=ab; src.connect(off.destination); src.start();
-      ab=await off.startRendering();
+  /* 녹음 파일을 처음부터 조금씩 읽어 16kHz 모노로 바꾸고, segSecs초가 찰 때마다 onSeg(구간)을 기다림.
+     파일 전체를 메모리에 올리지 않으므로 몇 시간짜리 녹음도 휴대폰에서 처리 가능 */
+  function Segmenter(segSecs, onSeg){
+    var len=segSecs*SR16, win=SR16*3, cap=len+win+SR16*4, buf=new Float32Array(cap), L=0, queue=[];
+    function cut(){
+      var best=len, bestE=Infinity, step=SR16/10;
+      for(var p=len-win;p<=len+win-step;p+=step){
+        var e=0; for(var i=p;i<p+step;i+=4) e+=buf[i]*buf[i];
+        if(e<bestE){ bestE=e; best=p+(step>>1); }
+      }
+      queue.push(buf.slice(0,best)); buf.copyWithin(0,best,L); L-=best;
     }
-    var n=ab.length, out=new Float32Array(n), ch=ab.numberOfChannels;
-    for(var c3=0;c3<ch;c3++){ var d=ab.getChannelData(c3); for(var i=0;i<n;i++) out[i]+=d[i]/ch; }
-    return out;
+    return {
+      push:function(x){ var o=0; while(o<x.length){ var n=Math.min(x.length-o, cap-L); buf.set(x.subarray(o,o+n),L); L+=n; o+=n; if(L>=len+win) cut(); } },
+      drain:async function(){ while(queue.length){ await onSeg(queue.shift()); } },
+      end:async function(){ if(L>SR16/2) queue.push(buf.slice(0,L)); L=0; while(queue.length){ await onSeg(queue.shift()); } }
+    };
   }
 
-  // 정해진 길이마다 자르되, 말이 끊기지 않게 경계 근처의 가장 조용한 곳에서 자름
-  function segments(pcm, secs){
-    var len=secs*SR16, win=SR16*3, step=SR16/10, out=[], start=0;
-    while(start<pcm.length){
-      var end=Math.min(pcm.length, start+len);
-      if(end<pcm.length){
-        var best=end, bestE=Infinity;
-        for(var p=end-win;p<=end+win-step && p+step<pcm.length;p+=step){
-          var e=0; for(var i=p;i<p+step;i+=4) e+=pcm[i]*pcm[i];
-          if(e<bestE){ bestE=e; best=p+step/2|0; }
-        }
-        end=best;
-      }
-      out.push(pcm.subarray(start,end)); start=end;
+  // 원래 샘플레이트 → 16kHz (저역 필터 + 선형 보간, 블록 단위로 이어서 처리)
+  function Resampler(inRate){
+    var ratio=inRate/SR16, t=0, prev=0, lp1=0, lp2=0, a=1-Math.exp(-2*Math.PI*7000/inRate);
+    if(inRate===SR16) return function(x){ return x; };
+    return function(x){
+      var n=x.length, arr=new Float32Array(n+1); arr[0]=prev;
+      for(var i=0;i<n;i++){ lp1+=a*(x[i]-lp1); lp2+=a*(lp1-lp2); arr[i+1]=lp2; }
+      var out=new Float32Array(Math.ceil((n+1)/ratio)+1), k=0;
+      while(t<n){ var j=t|0, f=t-j; out[k++]=arr[j]*(1-f)+arr[j+1]*f; t+=ratio; }
+      t-=n; prev=arr[n];
+      return out.subarray(0,k);
+    };
+  }
+
+  /* --- M4A(MP4) 최소 해석기: 오디오 트랙의 프레임 위치만 읽음 --- */
+  async function dv(f,a,b){ return new DataView(await f.slice(a,b).arrayBuffer()); }
+  function cc(d,o){ return String.fromCharCode(d.getUint8(o),d.getUint8(o+1),d.getUint8(o+2),d.getUint8(o+3)); }
+  function kids(d,s,e){
+    var out=[];
+    while(s+8<=e){
+      var size=d.getUint32(s), t=cc(d,s+4), h=8;
+      if(size===1){ size=Number(d.getBigUint64(s+8)); h=16; } else if(size===0) size=e-s;
+      if(size<8) break;
+      out.push({type:t, s:s+h, e:Math.min(e,s+size)}); s+=size;
     }
     return out;
+  }
+  function kid(d,box,t){ return kids(d,box.s,box.e).filter(function(k){return k.type===t})[0]; }
+  function descLen(d,o){ var n=0,b; do{ b=d.getUint8(o.p++); n=(n<<7)|(b&0x7f); }while(b&0x80); return n; }
+  async function readMp4(f){
+    var head=await dv(f,0,Math.min(f.size,16));
+    if(f.size<16 || cc(head,4)!=='ftyp') return null;
+    var off=0, moov=null;
+    while(off+8<=f.size){
+      var h=await dv(f,off,Math.min(f.size,off+16)), size=h.getUint32(0), t=cc(h,4);
+      if(size===1) size=Number(h.getBigUint64(8)); else if(size===0) size=f.size-off;
+      if(size<8) break;
+      if(t==='moov'){ moov={off:off,size:size}; break; }
+      off+=size;
+    }
+    if(!moov) return null;
+    var d=await dv(f,moov.off,moov.off+moov.size), root={s:8,e:moov.size};
+    if(d.getUint32(0)===1) root.s=16;
+    var traks=kids(d,root.s,root.e).filter(function(k){return k.type==='trak'});
+    for(var ti=0;ti<traks.length;ti++){
+      var mdia=kid(d,traks[ti],'mdia'); if(!mdia) continue;
+      var hdlr=kid(d,mdia,'hdlr'); if(!hdlr || cc(d,hdlr.s+8)!=='soun') continue;
+      var mdhd=kid(d,mdia,'mdhd'), v=d.getUint8(mdhd.s);
+      var ts=v===1?d.getUint32(mdhd.s+20):d.getUint32(mdhd.s+12);
+      var dur=v===1?Number(d.getBigUint64(mdhd.s+24)):d.getUint32(mdhd.s+16);
+      var stbl=kid(d,kid(d,mdia,'minf'),'stbl');
+      var stsd=kid(d,stbl,'stsd'), ent={s:stsd.s+8+8, type:cc(d,stsd.s+12)};
+      ent.e=stsd.s+8+d.getUint32(stsd.s+8);
+      var qv=d.getUint16(ent.s+8), ch=d.getUint16(ent.s+16), sr=d.getUint32(ent.s+24)>>>16;
+      var cs=ent.s+28+(qv===1?16:qv===2?36:0);
+      var codec=null, desc=null;
+      if(ent.type==='mp4a'){
+        var es=kid(d,{s:cs,e:ent.e},'esds');
+        if(!es){ var wave=kid(d,{s:cs,e:ent.e},'wave'); if(wave) es=kid(d,wave,'esds'); }
+        if(!es) throw new Error('지원하지 않는 M4A 형식이에요.');
+        var o={p:es.s+4};
+        while(o.p<es.e){
+          var tag=d.getUint8(o.p++), n=descLen(d,o);
+          if(tag===3){ var fl=d.getUint8(o.p+2); o.p+=3; if(fl&0x80) o.p+=2; if(fl&0x40) o.p+=1+d.getUint8(o.p); if(fl&0x20) o.p+=2; }
+          else if(tag===4){ o.p+=13; }
+          else if(tag===5){ desc=new Uint8Array(d.buffer.slice(o.p,o.p+n)); break; }
+          else o.p+=n;
+        }
+        if(!desc) throw new Error('지원하지 않는 M4A 형식이에요.');
+        codec='mp4a.40.'+(desc[0]>>3);
+      } else if(ent.type==='Opus'){ codec='opus'; if(!sr) sr=48000; }
+      else throw new Error('지원하지 않는 오디오 코덱('+ent.type+')이에요.');
+      var stsz=kid(d,stbl,'stsz'), fixed=d.getUint32(stsz.s+4), cnt=d.getUint32(stsz.s+8), sizes=new Uint32Array(cnt);
+      for(var i=0;i<cnt;i++) sizes[i]=fixed||d.getUint32(stsz.s+12+i*4);
+      var co=kid(d,stbl,'stco'), big=false; if(!co){ co=kid(d,stbl,'co64'); big=true; }
+      var nc=d.getUint32(co.s+4), offs=new Float64Array(nc);
+      for(i=0;i<nc;i++) offs[i]= big ? Number(d.getBigUint64(co.s+8+i*8)) : d.getUint32(co.s+8+i*4);
+      var stsc=kid(d,stbl,'stsc'), ne=d.getUint32(stsc.s+4), sc=[];
+      for(i=0;i<ne;i++) sc.push([d.getUint32(stsc.s+8+i*12), d.getUint32(stsc.s+12+i*12)]);
+      // 각 프레임의 파일 위치 계산
+      var pos=new Float64Array(cnt), si=0;
+      for(var c=0;c<nc && si<cnt;c++){
+        var per=0; for(var e2=0;e2<sc.length && sc[e2][0]<=c+1;e2++) per=sc[e2][1];
+        var p=offs[c]; for(var k=0;k<per && si<cnt;k++){ pos[si]=p; p+=sizes[si]; si++; }
+      }
+      return {codec:codec, desc:desc, sr:sr||44100, ch:ch||1, secs:dur/ts, sizes:sizes, pos:pos, count:si};
+    }
+    return null;
+  }
+
+  async function streamMp4(f, info, seg, onRead){
+    var rs=null, err=null, frameUs=1024*1e6/info.sr;
+    var dec=new AudioDecoder({
+      output:function(ad){
+        try{
+          var n=ad.numberOfFrames, ch=ad.numberOfChannels, mono=new Float32Array(n), tmp=new Float32Array(n);
+          for(var c=0;c<ch;c++){ ad.copyTo(tmp,{planeIndex:c, format:'f32-planar'}); for(var i=0;i<n;i++) mono[i]+=tmp[i]/ch; }
+          if(!rs) rs=Resampler(ad.sampleRate);
+          seg.push(rs(mono));
+        }catch(e){ err=e; } finally{ ad.close(); }
+      },
+      error:function(e){ err=e; }
+    });
+    var cfg={codec:info.codec, sampleRate:info.sr, numberOfChannels:info.ch};
+    if(info.desc) cfg.description=info.desc;
+    var sup=await AudioDecoder.isConfigSupported(cfg).catch(function(){return {supported:false}});
+    if(!sup.supported) return false;
+    dec.configure(cfg);
+    var wS=0, wE=0, w=null, WIN=4*1048576;
+    for(var i=0;i<info.count;i++){
+      if(aCancel) throw new Error('멈춤');
+      if(err) throw err;
+      var a=info.pos[i], b=a+info.sizes[i];
+      if(!w || a<wS || b>wE){ wS=a; wE=Math.min(f.size, Math.max(b, a+WIN)); w=new Uint8Array(await f.slice(wS,wE).arrayBuffer()); }
+      dec.decode(new EncodedAudioChunk({type:'key', timestamp:Math.round(i*frameUs), data:w.subarray(a-wS,b-wS)}));
+      if(i%200===199){
+        while(dec.decodeQueueSize>20) await new Promise(function(r){setTimeout(r,5)});
+        await seg.drain(); onRead(i/info.count);
+      }
+    }
+    await dec.flush(); dec.close(); if(err) throw err;
+    await seg.end(); onRead(1);
+    return true;
+  }
+
+  // 예비 방법: 파일 전체를 한 번에 풀기 (MP3·WAV 또는 위 방법이 안 될 때). 큰 파일은 휴대폰 메모리 초과 위험
+  async function decodeWhole(f, seg){
+    var mobile=/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+    if(f.size > (mobile?40:300)*1048576) throw new Error('TOO_BIG');
+    var AC=window.AudioContext||window.webkitAudioContext, c=new AC(), ab=await c.decodeAudioData(await f.arrayBuffer());
+    c.close&&c.close();
+    var n=ab.length, ch=ab.numberOfChannels, rs=Resampler(ab.sampleRate), B=SR16*10;
+    var chans=[]; for(var k=0;k<ch;k++) chans.push(ab.getChannelData(k));
+    for(var s0=0;s0<n;s0+=B){
+      if(aCancel) throw new Error('멈춤');
+      var m=Math.min(B,n-s0), mono=new Float32Array(m);
+      for(k=0;k<ch;k++){ var d=chans[k]; for(var i=0;i<m;i++) mono[i]+=d[s0+i]/ch; }
+      seg.push(rs(mono)); await seg.drain();
+    }
+    await seg.end();
   }
 
   function toWav(pcm){
@@ -460,56 +592,47 @@ select{font:inherit;font-size:15px;color:var(--ink);background:var(--card);borde
       w.postMessage(msg, transfer||[]);
     });
   }
-  async function runLocal(segs, total){
+  async function prepLocal(){
     var model=$('model').value, files={};
-    if(workerModel!==model){
-      aProgress(0,'변환 모델 내려받는 중… (처음 한 번만, 다음부터는 바로 시작)');
-      await ask({type:'load', model:model}, null, function(p){
-        if(p.status!=='progress'||!p.total) return;
-        files[p.file]={l:p.loaded,t:p.total};
-        var L=0,T=0; Object.keys(files).forEach(function(k){L+=files[k].l;T+=files[k].t});
-        aProgress(L/T,'변환 모델 내려받는 중… '+Math.round(L/1048576)+' / '+Math.round(T/1048576)+'MB (처음 한 번만)');
-      });
-      workerModel=model;
-    }
-    await loop(segs, total, async function(seg){
-      var copy=new Float32Array(seg);
-      var d=await ask({type:'run', audio:copy}, [copy.buffer]);
-      return d.text;
+    if(workerModel===model) return;
+    aProgress(0,'변환 모델 내려받는 중… (처음 한 번만, 다음부터는 바로 시작)');
+    await ask({type:'load', model:model}, null, function(p){
+      if(p.status!=='progress'||!p.total) return;
+      files[p.file]={l:p.loaded,t:p.total};
+      var L=0,T=0; Object.keys(files).forEach(function(k){L+=files[k].l;T+=files[k].t});
+      aProgress(L/T,'변환 모델 내려받는 중… '+Math.round(L/1048576)+' / '+Math.round(T/1048576)+'MB (처음 한 번만)');
     });
+    workerModel=model;
+  }
+  async function localSeg(seg){
+    var d=await ask({type:'run', audio:seg}, [seg.buffer]);
+    return d.text;
   }
 
-  // 빠른 변환: OpenAI 음성 인식 (10분씩 나눠 보냄, 파일 크기 제한 25MB 이하)
-  async function runOpenAI(segs, total, key){
-    var prev='';
-    await loop(segs, total, async function(seg){
-      var fd=new FormData();
-      fd.append('file', toWav(seg), 'part.wav');
-      fd.append('model','gpt-4o-transcribe');
-      fd.append('language','ko');
-      if(prev) fd.append('prompt', prev.slice(-200));
+  // 빠른 변환: OpenAI 음성 인식 (10분 구간 WAV, 25MB 제한 이하)
+  var prevText='';
+  async function openaiSeg(seg, key){
+    var fd=new FormData();
+    fd.append('file', toWav(seg), 'part.wav');
+    fd.append('model','gpt-4o-transcribe');
+    fd.append('language','ko');
+    if(prevText) fd.append('prompt', prevText.slice(-200));
+    var r=null;
+    for(var tries=0;tries<3;tries++){
       aCtrl=new AbortController();
-      var r=await fetch('https://api.openai.com/v1/audio/transcriptions',{method:'POST', headers:{Authorization:'Bearer '+key}, body:fd, signal:aCtrl.signal});
-      if(!r.ok){
-        var m = r.status===401 ? 'API 키가 맞지 않아요. 키를 다시 확인해 주세요.'
-          : r.status===429 ? 'OpenAI 사용 한도나 잔액이 부족해요. OpenAI 결제 화면을 확인해 주세요.'
-          : 'OpenAI 변환 오류 ('+r.status+'). 잠시 후 다시 시도해 주세요.';
-        throw new Error(m);
-      }
-      var j=await r.json(); prev=j.text||''; return prev;
-    });
-  }
-
-  async function loop(segs, total, fn){
-    var t0=Date.now(), done=0;
-    for(var i=0;i<segs.length;i++){
+      try{ r=await fetch('https://api.openai.com/v1/audio/transcriptions',{method:'POST', headers:{Authorization:'Bearer '+key}, body:fd, signal:aCtrl.signal}); }
+      catch(e){ if(e&&e.name==='AbortError') throw e; r=null; }
+      if(r && (r.ok || r.status===401 || r.status===400)) break;
       if(aCancel) throw new Error('멈춤');
-      var left='';
-      if(i>0){ var per=(Date.now()-t0)/done, rest=(total-done)*per/60000; left=' · 남은 시간 약 '+(rest<1?'1분 이내':Math.ceil(rest)+'분'); }
-      aProgress(done/total, (i+1)+' / '+segs.length+' 구간 변환 중'+left);
-      appendLine(await fn(segs[i]));
-      done+=segs[i].length/SR16;
+      await new Promise(function(res){setTimeout(res,2000*(tries+1))});
     }
+    if(!r) throw new Error('인터넷 연결이 끊겼어요. 연결을 확인하고 다시 시도해 주세요.');
+    if(!r.ok){
+      throw new Error(r.status===401 ? 'API 키가 맞지 않아요. 키를 다시 확인해 주세요.'
+        : r.status===429 ? 'OpenAI 사용 한도나 잔액이 부족해요. OpenAI 결제 화면을 확인해 주세요.'
+        : 'OpenAI 변환 오류 ('+r.status+'). 잠시 후 다시 시도해 주세요.');
+    }
+    var j=await r.json(); prevText=j.text||''; return prevText;
   }
 
   $('aGo').onclick=async function(){
@@ -521,21 +644,42 @@ select{font:inherit;font-size:15px;color:var(--ink);background:var(--card);borde
     }
     aBusy=true; aCancel=false; $('aGo').disabled=true; $('aStop').disabled=false; aSay('');
     try{
-      aProgress(0,'녹음 파일 읽는 중…');
-      var pcm=await decodeAudio(audioFile), total=pcm.length/SR16;
-      var segs=segments(pcm, eng==='openai'?600:300);
-      if(eng==='openai') await runOpenAI(segs,total,key); else await runLocal(segs,total);
+      aProgress(0,'녹음 파일 확인 중…');
+      try{ localStorage.setItem(BUSYKEY, audioFile.name); }catch(_){}
+      if(eng==='local') await prepLocal();
+      prevText='';
+      var info=null; try{ info=await readMp4(audioFile); }catch(e){ info=null; }
+      var total=info?info.secs:0, doneSecs=0, nSeg=0, t0=Date.now(), readFrac=0, segSecs=eng==='openai'?600:300;
+      var segN=total?Math.max(1,Math.ceil(total/segSecs)):0;
+      function status(){
+        var frac=total?doneSecs/total:readFrac, left='';
+        if(doneSecs>0 && total){ var rest=(total-doneSecs)*((Date.now()-t0)/doneSecs)/60000; left=' · 남은 시간 약 '+(rest<1?'1분 이내':Math.ceil(rest)+'분'); }
+        aProgress(frac, (nSeg+1)+(segN?' / '+segN:'')+' 구간 변환 중'+left+(total?' · 전체 '+Math.round(total/60)+'분':''));
+      }
+      var seg=Segmenter(segSecs, async function(pcm){
+        status();
+        var secs=pcm.length/SR16;
+        var text=eng==='openai' ? await openaiSeg(pcm,key) : await localSeg(pcm);
+        appendLine(text); nSeg++; doneSecs+=secs; status();
+      });
+      status();
+      var ok=false;
+      if(info && window.AudioDecoder) ok=await streamMp4(audioFile, info, seg, function(fr){ readFrac=fr; });
+      if(!ok){ await decodeWhole(audioFile, seg); total=total||doneSecs; }
+      total=doneSecs;
       aProgress(1,'다 바꿨어요 · 녹음 '+Math.round(total/60)+'분');
       aSay('변환이 끝났어요. 잘못 들린 글자를 고친 뒤 정리하기를 누르세요.');
       $('transcript').scrollIntoView({behavior:'smooth',block:'center'});
     }catch(err){
       var m=err&&err.message||'';
-      if(m==='멈춤'||(err&&err.name==='AbortError')) aSay('멈췄어요. 여기까지 바뀐 글은 대화 내용 칸에 남아 있어요.');
+      if(m==='TOO_BIG') aSay('이 휴대폰 브라우저로는 큰 녹음 파일을 나눠 읽을 수 없어요. 크롬 최신 버전으로 열거나 PC에서 해 주세요.',true);
+      else if(m==='멈춤'||(err&&err.name==='AbortError')) aSay('멈췄어요. 여기까지 바뀐 글은 대화 내용 칸에 남아 있어요.');
       else if(/decode|Decoding|EncodingError|Unable to decode/i.test(m)||(err&&err.name==='EncodingError')) aSay('이 녹음 파일을 열지 못했어요. 크롬이나 사파리 최신 버전에서 다시 해 보세요.',true);
       else if(/memory|allocation|Array buffer/i.test(m)) aSay('녹음이 길어서 이 기기 메모리가 부족해요. PC에서 하거나 빠른 변환(OpenAI)을 써 보세요.',true);
       else if(/Failed to fetch|NetworkError|Load failed/i.test(m)) aSay('인터넷 연결 또는 접속이 막혀 있어요. claude.ai 안에서는 이 기능이 막히니, 웹 주소(GitHub Pages)로 열어 주세요.',true);
       else aSay(m||'변환하지 못했어요.',true);
     }finally{
+      try{ localStorage.removeItem(BUSYKEY); }catch(_){}
       aBusy=false; $('aGo').disabled=false; $('aStop').disabled=true;
     }
   };
