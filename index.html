@@ -42,7 +42,7 @@ h2{font-size:15px;font-weight:600;margin:0 0 8px}
 .hint{font-size:13px;color:var(--sub);margin:8px 0 0}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
 @media (max-width:420px){.row{grid-template-columns:1fr}}
-input[type=text],textarea{width:100%;font:inherit;font-size:15px;color:var(--ink);background:var(--card);
+input[type=text],input[type=password],textarea{width:100%;font:inherit;font-size:15px;color:var(--ink);background:var(--card);
   border:1.5px solid var(--line);border-radius:10px;padding:11px 12px}
 input[type=text]:focus,textarea:focus,button:focus-visible,.file-label:focus-within{outline:3px solid var(--primary);outline-offset:2px}
 textarea{min-height:200px;resize:vertical;line-height:1.7}
@@ -92,6 +92,22 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
 .hist-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
 .hist-head h2{margin:0}
 .hist-head .btn.ghost{width:auto;padding:8px 12px}
+.audio{background:var(--card);border:1.5px solid var(--line);border-radius:16px;padding:16px;margin-top:12px;display:grid;gap:12px}
+.audio .fname{font-weight:600;word-break:break-all}
+.audio .fname span{font-weight:400;color:var(--sub);font-size:13px}
+.opts{display:grid;gap:8px}
+.opt{display:flex;gap:10px;align-items:flex-start;border:1.5px solid var(--line);border-radius:12px;padding:10px 12px;cursor:pointer}
+.opt:has(input:checked){border-color:var(--primary);background:var(--soft)}
+.opt input{margin-top:5px;accent-color:var(--primary)}
+.opt b{display:block;font-size:15px}
+.opt small{display:block;color:var(--sub);font-size:13px;line-height:1.5}
+select{font:inherit;font-size:15px;color:var(--ink);background:var(--card);border:1.5px solid var(--line);border-radius:10px;padding:9px 10px;width:100%}
+.keyrow{display:grid;gap:6px}
+.keyrow label.chk{font-size:13px;color:var(--sub);display:flex;gap:6px;align-items:center}
+.bar{height:10px;background:var(--soft);border-radius:999px;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--primary);transition:width .3s}
+.pstat{font-size:13px;color:var(--sub);font-variant-numeric:tabular-nums}
+.two{display:grid;grid-template-columns:2fr 1fr;gap:8px}
 [hidden]{display:none !important}
 </style>
 </head>
@@ -133,11 +149,40 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
 
     <div id="pane-file" hidden>
       <label class="file-label" id="fileLabel">
-        <input type="file" id="file" accept=".txt,.md,.srt,.vtt,.csv,text/plain">
-        <b>텍스트 파일 올리기</b>
-        <span>.txt .srt .vtt .md · 아래 칸에 직접 붙여넣어도 됩니다</span>
+        <input type="file" id="file" accept=".m4a,.mp3,.wav,.aac,.ogg,.webm,.mp4,audio/*,.txt,.md,.srt,.vtt,.csv,text/plain">
+        <b>녹음 파일 또는 텍스트 파일 올리기</b>
+        <span>.m4a .mp3 .wav · .txt .srt .vtt · 아래 칸에 직접 붙여넣어도 됩니다</span>
       </label>
-      <p class="hint">음성 파일(mp3·m4a)은 이 화면에서 글로 바꿀 수 없어요. 폰 녹음 앱의 텍스트 변환이나 클로바노트 결과를 올려 주세요.</p>
+
+      <div class="audio" id="audio" hidden>
+        <div class="fname" id="aName"></div>
+        <div class="opts" role="radiogroup" aria-label="글로 바꾸는 방법">
+          <label class="opt"><input type="radio" name="eng" value="local" checked>
+            <div><b>무료 · 이 기기에서 변환</b><small>녹음이 밖으로 나가지 않아요. 처음 한 번 변환 모델을 내려받아요. PC 크롬 권장, 휴대폰에서는 오래 걸려요.</small></div></label>
+          <label class="opt"><input type="radio" name="eng" value="openai">
+            <div><b>빠른 변환 · OpenAI</b><small>휴대폰에서도 빠르고 더 정확해요. OpenAI API 키가 필요하고 1시간에 약 500원 들어요. 녹음이 OpenAI로 전송돼요.</small></div></label>
+        </div>
+        <div id="localOpts">
+          <select id="model" aria-label="변환 모델">
+            <option value="Xenova/whisper-small">정확하게 (권장 · 처음 약 250MB 내려받음)</option>
+            <option value="Xenova/whisper-base">빠르게 (처음 약 80MB · 정확도 낮음)</option>
+          </select>
+        </div>
+        <div class="keyrow" id="keyOpts" hidden>
+          <input type="password" id="apiKey" placeholder="OpenAI API 키 (sk-로 시작)" autocomplete="off" spellcheck="false" aria-label="OpenAI API 키">
+          <label class="chk"><input type="checkbox" id="keySave"> 이 기기에 키 기억하기</label>
+        </div>
+        <div class="two">
+          <button class="btn" id="aGo" type="button">글로 바꾸기</button>
+          <button class="btn ghost" id="aStop" type="button" disabled>멈추기</button>
+        </div>
+        <div id="aProg" hidden>
+          <div class="bar"><i id="aBar"></i></div>
+          <div class="pstat" id="aStat" aria-live="polite"></div>
+        </div>
+        <div class="msg" id="aMsg" hidden></div>
+      </div>
+      <p class="hint">바뀐 글은 아래 "대화 내용" 칸에 차례로 쌓여요. 변환이 끝나면 정리하기를 누르세요.</p>
     </div>
   </section>
 
@@ -299,8 +344,11 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
   /* ---------- 파일 올리기 ---------- */
   $('file').addEventListener('change', function(e){
     var f=e.target.files&&e.target.files[0]; if(!f) return;
+    if(/\.(m4a|mp3|wav|aac|ogg|webm|mp4)$/i.test(f.name) || f.type.indexOf('audio')===0){
+      pickAudio(f); e.target.value=''; return;
+    }
     if(!/\.(txt|md|srt|vtt|csv)$/i.test(f.name) && f.type.indexOf('text')!==0){
-      say('텍스트 파일만 올릴 수 있어요. (.txt .srt .vtt .md)',true); return;
+      say('녹음 파일(.m4a .mp3 .wav)이나 텍스트 파일(.txt .srt .vtt)만 올릴 수 있어요.',true); return;
     }
     var rd=new FileReader();
     rd.onload=function(){
@@ -313,6 +361,189 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
     rd.onerror=function(){say('파일을 읽지 못했어요.',true)};
     rd.readAsText(f,'UTF-8'); e.target.value='';
   });
+
+  /* ---------- 녹음 파일 → 글 ---------- */
+  var pendingReject=null, SR16=16000, audioFile=null, aBusy=false, aCancel=false, worker=null, workerModel=null, aCtrl=null;
+  var KEYSTORE='conv-notes-openai-key';
+  function aSay(t,err){ show($('aMsg'),t,err); }
+  function aProgress(frac, text){ $('aProg').hidden=false; $('aBar').style.width=Math.round(frac*100)+'%'; $('aStat').textContent=text; }
+  function engine(){ return document.querySelector('input[name=eng]:checked').value; }
+  function syncEngine(){ var o=engine()==='openai'; $('keyOpts').hidden=!o; $('localOpts').hidden=o; }
+  Array.prototype.forEach.call(document.querySelectorAll('input[name=eng]'),function(r){ r.onchange=syncEngine; });
+  try{ var k0=localStorage.getItem(KEYSTORE); if(k0){ $('apiKey').value=k0; $('keySave').checked=true; } }catch(_){}
+
+  function pickAudio(f){
+    audioFile=f; $('audio').hidden=false; aSay(''); $('aProg').hidden=true;
+    $('aName').textContent=f.name+' '; var sp=document.createElement('span'); sp.textContent='('+(f.size/1048576).toFixed(1)+'MB)'; $('aName').appendChild(sp);
+    $('audio').scrollIntoView({behavior:'smooth',block:'center'});
+  }
+
+  // 녹음 파일을 16kHz 모노 숫자 배열로 풀기
+  async function decodeAudio(f){
+    var buf=await f.arrayBuffer(), ab;
+    var AC=window.AudioContext||window.webkitAudioContext;
+    try{ var c=new AC({sampleRate:SR16}); ab=await c.decodeAudioData(buf.slice(0)); c.close&&c.close(); }
+    catch(_){ var c2=new AC(); ab=await c2.decodeAudioData(buf); c2.close&&c2.close(); }
+    if(ab.sampleRate!==SR16){
+      var off=new OfflineAudioContext(1, Math.ceil(ab.duration*SR16), SR16);
+      var src=off.createBufferSource(); src.buffer=ab; src.connect(off.destination); src.start();
+      ab=await off.startRendering();
+    }
+    var n=ab.length, out=new Float32Array(n), ch=ab.numberOfChannels;
+    for(var c3=0;c3<ch;c3++){ var d=ab.getChannelData(c3); for(var i=0;i<n;i++) out[i]+=d[i]/ch; }
+    return out;
+  }
+
+  // 정해진 길이마다 자르되, 말이 끊기지 않게 경계 근처의 가장 조용한 곳에서 자름
+  function segments(pcm, secs){
+    var len=secs*SR16, win=SR16*3, step=SR16/10, out=[], start=0;
+    while(start<pcm.length){
+      var end=Math.min(pcm.length, start+len);
+      if(end<pcm.length){
+        var best=end, bestE=Infinity;
+        for(var p=end-win;p<=end+win-step && p+step<pcm.length;p+=step){
+          var e=0; for(var i=p;i<p+step;i+=4) e+=pcm[i]*pcm[i];
+          if(e<bestE){ bestE=e; best=p+step/2|0; }
+        }
+        end=best;
+      }
+      out.push(pcm.subarray(start,end)); start=end;
+    }
+    return out;
+  }
+
+  function toWav(pcm){
+    var b=new ArrayBuffer(44+pcm.length*2), v=new DataView(b);
+    function w(o,s){ for(var i=0;i<s.length;i++) v.setUint8(o+i,s.charCodeAt(i)); }
+    w(0,'RIFF'); v.setUint32(4,36+pcm.length*2,true); w(8,'WAVE'); w(12,'fmt ');
+    v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true); v.setUint32(24,SR16,true);
+    v.setUint32(28,SR16*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true); w(36,'data'); v.setUint32(40,pcm.length*2,true);
+    for(var i=0,o=44;i<pcm.length;i++,o+=2){ var x=Math.max(-1,Math.min(1,pcm[i])); v.setInt16(o, x<0?x*0x8000:x*0x7fff, true); }
+    return new Blob([b],{type:'audio/wav'});
+  }
+
+  function appendLine(t){
+    t=String(t||'').trim(); if(!t) return;
+    var ta=$('transcript'); ta.value=(ta.value.trim()?ta.value.replace(/\s+$/,'')+'\n':'')+t;
+    refreshGo(); saveDraft();
+  }
+
+  // 무료 변환: 브라우저 안에서 Whisper 모델 실행 (별도 작업 스레드)
+  var WORKER_SRC=[
+    "import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/dist/transformers.min.js';",
+    "env.allowLocalModels=false;",
+    "let asr=null, cur=null;",
+    "self.onmessage=async(e)=>{ const m=e.data; try{",
+    "  if(m.type==='load'){",
+    "    if(!asr||cur!==m.model){ asr=await pipeline('automatic-speech-recognition', m.model, {dtype:'q8', device:'wasm',",
+    "      progress_callback:(p)=>self.postMessage({type:'dl', p})}); cur=m.model; }",
+    "    self.postMessage({type:'ready'});",
+    "  } else if(m.type==='run'){",
+    "    const out=await asr(m.audio,{language:'korean', task:'transcribe', chunk_length_s:30, stride_length_s:5});",
+    "    self.postMessage({type:'text', text:out.text});",
+    "  }",
+    "}catch(err){ self.postMessage({type:'error', message:String(err&&err.message||err)}); } };"
+  ].join('\n');
+  function getWorker(){
+    if(!worker) worker=new Worker(URL.createObjectURL(new Blob([WORKER_SRC],{type:'text/javascript'})),{type:'module'});
+    return worker;
+  }
+  function ask(msg, transfer, onDl){
+    return new Promise(function(res,rej){
+      pendingReject=rej;
+      var w=getWorker();
+      w.onmessage=function(e){ var d=e.data;
+        if(d.type==='dl'){ onDl&&onDl(d.p); return; }
+        if(d.type==='error') rej(new Error(d.message)); else res(d);
+      };
+      w.onerror=function(e){ rej(new Error(e.message||'변환 모델을 불러오지 못했어요')); };
+      w.postMessage(msg, transfer||[]);
+    });
+  }
+  async function runLocal(segs, total){
+    var model=$('model').value, files={};
+    if(workerModel!==model){
+      aProgress(0,'변환 모델 내려받는 중… (처음 한 번만, 다음부터는 바로 시작)');
+      await ask({type:'load', model:model}, null, function(p){
+        if(p.status!=='progress'||!p.total) return;
+        files[p.file]={l:p.loaded,t:p.total};
+        var L=0,T=0; Object.keys(files).forEach(function(k){L+=files[k].l;T+=files[k].t});
+        aProgress(L/T,'변환 모델 내려받는 중… '+Math.round(L/1048576)+' / '+Math.round(T/1048576)+'MB (처음 한 번만)');
+      });
+      workerModel=model;
+    }
+    await loop(segs, total, async function(seg){
+      var copy=new Float32Array(seg);
+      var d=await ask({type:'run', audio:copy}, [copy.buffer]);
+      return d.text;
+    });
+  }
+
+  // 빠른 변환: OpenAI 음성 인식 (10분씩 나눠 보냄, 파일 크기 제한 25MB 이하)
+  async function runOpenAI(segs, total, key){
+    var prev='';
+    await loop(segs, total, async function(seg){
+      var fd=new FormData();
+      fd.append('file', toWav(seg), 'part.wav');
+      fd.append('model','gpt-4o-transcribe');
+      fd.append('language','ko');
+      if(prev) fd.append('prompt', prev.slice(-200));
+      aCtrl=new AbortController();
+      var r=await fetch('https://api.openai.com/v1/audio/transcriptions',{method:'POST', headers:{Authorization:'Bearer '+key}, body:fd, signal:aCtrl.signal});
+      if(!r.ok){
+        var m = r.status===401 ? 'API 키가 맞지 않아요. 키를 다시 확인해 주세요.'
+          : r.status===429 ? 'OpenAI 사용 한도나 잔액이 부족해요. OpenAI 결제 화면을 확인해 주세요.'
+          : 'OpenAI 변환 오류 ('+r.status+'). 잠시 후 다시 시도해 주세요.';
+        throw new Error(m);
+      }
+      var j=await r.json(); prev=j.text||''; return prev;
+    });
+  }
+
+  async function loop(segs, total, fn){
+    var t0=Date.now(), done=0;
+    for(var i=0;i<segs.length;i++){
+      if(aCancel) throw new Error('멈춤');
+      var left='';
+      if(i>0){ var per=(Date.now()-t0)/done, rest=(total-done)*per/60000; left=' · 남은 시간 약 '+(rest<1?'1분 이내':Math.ceil(rest)+'분'); }
+      aProgress(done/total, (i+1)+' / '+segs.length+' 구간 변환 중'+left);
+      appendLine(await fn(segs[i]));
+      done+=segs[i].length/SR16;
+    }
+  }
+
+  $('aGo').onclick=async function(){
+    if(aBusy||!audioFile) return;
+    var eng=engine(), key=$('apiKey').value.trim();
+    if(eng==='openai'){
+      if(!/^sk-/.test(key)){ aSay('OpenAI API 키를 넣어 주세요. (sk-로 시작)',true); return; }
+      try{ $('keySave').checked ? localStorage.setItem(KEYSTORE,key) : localStorage.removeItem(KEYSTORE); }catch(_){}
+    }
+    aBusy=true; aCancel=false; $('aGo').disabled=true; $('aStop').disabled=false; aSay('');
+    try{
+      aProgress(0,'녹음 파일 읽는 중…');
+      var pcm=await decodeAudio(audioFile), total=pcm.length/SR16;
+      var segs=segments(pcm, eng==='openai'?600:300);
+      if(eng==='openai') await runOpenAI(segs,total,key); else await runLocal(segs,total);
+      aProgress(1,'다 바꿨어요 · 녹음 '+Math.round(total/60)+'분');
+      aSay('변환이 끝났어요. 잘못 들린 글자를 고친 뒤 정리하기를 누르세요.');
+      $('transcript').scrollIntoView({behavior:'smooth',block:'center'});
+    }catch(err){
+      var m=err&&err.message||'';
+      if(m==='멈춤'||(err&&err.name==='AbortError')) aSay('멈췄어요. 여기까지 바뀐 글은 대화 내용 칸에 남아 있어요.');
+      else if(/decode|Decoding|EncodingError|Unable to decode/i.test(m)||(err&&err.name==='EncodingError')) aSay('이 녹음 파일을 열지 못했어요. 크롬이나 사파리 최신 버전에서 다시 해 보세요.',true);
+      else if(/memory|allocation|Array buffer/i.test(m)) aSay('녹음이 길어서 이 기기 메모리가 부족해요. PC에서 하거나 빠른 변환(OpenAI)을 써 보세요.',true);
+      else if(/Failed to fetch|NetworkError|Load failed/i.test(m)) aSay('인터넷 연결 또는 접속이 막혀 있어요. claude.ai 안에서는 이 기능이 막히니, 웹 주소(GitHub Pages)로 열어 주세요.',true);
+      else aSay(m||'변환하지 못했어요.',true);
+    }finally{
+      aBusy=false; $('aGo').disabled=false; $('aStop').disabled=true;
+    }
+  };
+  $('aStop').onclick=function(){
+    aCancel=true; try{ aCtrl&&aCtrl.abort(); }catch(_){}
+    if(worker && engine()==='local'){ worker.terminate(); worker=null; workerModel=null; pendingReject&&pendingReject(new Error('멈춤')); }
+    aSay('멈추는 중…');
+  };
 
   /* ---------- 정리하기 (Claude) ---------- */
   var CHUNK=12000;   // 이보다 긴 글은 나눠서 1차 정리 후 합칩니다
@@ -391,7 +622,12 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
     say('');
     var sample=null;
     try{ sample = (window.claude && window.claude.use) ? await window.claude.use('sample') : null; }catch(_){}
-    if(!sample){ say('이 화면에서는 AI 정리를 쓸 수 없어요. claude.ai에서 이 링크를 열어 주세요.',true); return; }
+    if(!sample){
+      var ok=await copyText(buildPrompt($('transcript').value.trim()));
+      say(ok ? '정리 요청문을 복사했어요. Claude 앱(또는 claude.ai) 대화창에 붙여넣으면 바로 정리돼요.'
+             : '복사하지 못했어요. 대화 내용을 직접 복사해 Claude에 붙여넣어 주세요.', !ok);
+      return;
+    }
     $('go').disabled=true; $('go').textContent='정리하는 중…';
     state.ctrl=new AbortController();
     try{
@@ -431,14 +667,16 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
     var head=[T.label+(who?' · '+who:''), new Date().toLocaleString('ko-KR'), why?'목적: '+why:''].filter(Boolean).join('\n');
     return head+'\n\n'+state.lastText+'\n\n--- 원문 ---\n'+$('transcript').value.trim();
   }
-  $('copy').onclick=async function(){
-    var t=fullText();
-    try{ await navigator.clipboard.writeText(t); say('복사했어요.'); }
+  async function copyText(t){
+    try{ await navigator.clipboard.writeText(t); return true; }
     catch(_){
       var ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta); ta.select();
-      var ok=false; try{ok=document.execCommand('copy')}catch(__){} ta.remove();
-      say(ok?'복사했어요.':'복사하지 못했어요. 아래 결과를 길게 눌러 직접 복사해 주세요.',!ok);
+      var ok=false; try{ok=document.execCommand('copy')}catch(__){} ta.remove(); return ok;
     }
+  }
+  $('copy').onclick=async function(){
+    var ok=await copyText(fullText());
+    say(ok?'복사했어요.':'복사하지 못했어요. 아래 결과를 길게 눌러 직접 복사해 주세요.',!ok);
   };
   $('save').onclick=async function(){
     var dl=null; try{ dl=(window.claude&&window.claude.use)?await window.claude.use('downloads'):null }catch(_){}
