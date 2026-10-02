@@ -85,6 +85,13 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
 .hitem button.del{width:48px;border:1.5px solid var(--line);background:var(--card);color:var(--sub);border-radius:12px;font:inherit;cursor:pointer}
 .empty{color:var(--sub);font-size:14px;margin:0}
 .legal{font-size:12px;color:var(--sub);margin-top:18px}
+.spk{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+.spk button{border:1.5px solid var(--line);background:var(--card);color:var(--ink);border-radius:10px;font:inherit;font-size:14px;
+  padding:8px;min-height:44px;cursor:pointer}
+.spk button[aria-pressed="true"]{background:var(--soft);border-color:var(--primary);font-weight:600}
+.hist-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
+.hist-head h2{margin:0}
+.hist-head .btn.ghost{width:auto;padding:8px 12px}
 [hidden]{display:none !important}
 </style>
 </head>
@@ -115,6 +122,11 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
         <button class="rec-btn" id="recBtn" aria-label="녹음 시작">녹음</button>
         <div class="hint" id="recHint">누르면 말하는 내용이 바로 글로 바뀝니다.</div>
         <div class="interim" id="interim" aria-live="polite"></div>
+        <div class="spk" role="group" aria-label="지금 말하는 사람">
+          <button type="button" id="spkMe" aria-pressed="false">나 말하는 중</button>
+          <button type="button" id="spkThem" aria-pressed="false">상대 말하는 중</button>
+        </div>
+        <div class="hint">말하는 사람이 바뀔 때 눌러 주면 정리할 때 누가 한 말인지 구분돼요. (안 눌러도 됩니다)</div>
       </div>
       <div class="msg" id="recMsg" hidden></div>
     </div>
@@ -145,7 +157,11 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
   </section>
 
   <section>
-    <h2>지난 기록</h2>
+    <div class="hist-head">
+      <h2>지난 기록</h2>
+      <button class="btn ghost" id="csv" type="button">표(CSV)로 내보내기</button>
+    </div>
+    <p class="hint" style="margin:0 0 8px">위에서 고른 종류의 기록만 한 줄씩 표로 저장돼요. 구글 시트·엑셀에서 열 수 있어요.</p>
     <div class="hist" id="hist"></div>
   </section>
 
@@ -167,7 +183,7 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
       '한 줄 요약','강의 주제와 목적','핵심 요점 (3~7개, 중요한 순서)','기억할 용어·숫자·사례','바로 적용해 볼 것','복습 질문 (스스로 점검용 3개)','더 알아볼 것']}
   };
   var $ = function(id){return document.getElementById(id)};
-  var state = {type:'bni', recording:false, secs:0, lastText:'', current:null, ctrl:null};
+  var state = {spk:null, spkNew:false, type:'bni', recording:false, secs:0, lastText:'', current:null, ctrl:null};
   var KEY = 'conv-notes-v1';
 
   /* ---------- 종류 칩 ---------- */
@@ -180,6 +196,7 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
       state.type=k;
       Array.prototype.forEach.call(typesEl.children,function(c){c.setAttribute('aria-pressed','false')});
       b.setAttribute('aria-pressed','true');
+      if(typeof saveDraft==='function') saveDraft();
     });
     typesEl.appendChild(b);
   });
@@ -199,12 +216,47 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
   function say(t,err){ show($('msg'),t,err); }
 
   function refreshGo(){ $('go').disabled = $('transcript').value.trim().length < 20; }
-  $('transcript').addEventListener('input', refreshGo);
+
+  /* ---------- 작성 중 내용 자동 저장 (창을 닫아도 남음) ---------- */
+  var DRAFT='conv-notes-draft-v1', draftT=null;
+  function saveDraft(){
+    clearTimeout(draftT);
+    draftT=setTimeout(function(){
+      try{ localStorage.setItem(DRAFT, JSON.stringify({type:state.type, who:$('who').value, why:$('why').value, transcript:$('transcript').value})); }catch(_){}
+    }, 400);
+  }
+  function clearDraft(){ try{ localStorage.removeItem(DRAFT); }catch(_){} }
+  ['transcript','who','why'].forEach(function(id){ $(id).addEventListener('input', function(){ refreshGo(); saveDraft(); }); });
 
   /* ---------- 녹음 (브라우저 음성 인식) ---------- */
   var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   var rec=null, timerId=null, wake=null;
   function fmt(s){var m=Math.floor(s/60),x=s%60;return (m<10?'0':'')+m+':'+(x<10?'0':'')+x}
+
+  function spkName(){ return state.spk==='me' ? '나' : ($('who').value.trim() || '상대'); }
+  function addText(t){
+    if(!t) return;
+    var ta=$('transcript'), v=ta.value;
+    if(state.spk && state.spkNew){ v = v.replace(/\s+$/,''); v += (v?'\n':'') + '['+spkName()+'] '; state.spkNew=false; }
+    else if(v && !/\s$/.test(v)) v += ' ';
+    ta.value = v + t + ' ';
+    refreshGo(); saveDraft();
+  }
+  function setSpk(who){
+    state.spk = who; state.spkNew = true;
+    $('spkMe').setAttribute('aria-pressed', who==='me');
+    $('spkThem').setAttribute('aria-pressed', who==='them');
+  }
+  $('spkMe').onclick=function(){ setSpk('me') };
+  $('spkThem').onclick=function(){ setSpk('them') };
+
+  /* 화면이 꺼졌다 켜지면 녹음 다시 시작 */
+  document.addEventListener('visibilitychange', function(){
+    if(document.visibilityState==='visible' && state.recording){
+      try{ rec.start(); }catch(_){}
+      try{ if(navigator.wakeLock && !wake) navigator.wakeLock.request('screen').then(function(w){wake=w}).catch(function(){}); }catch(_){}
+    }
+  });
 
   function startRec(){
     if(!SR){ show($('recMsg'),'이 브라우저는 음성 인식을 지원하지 않아요. 크롬(안드로이드)이나 사파리(아이폰)로 열거나, "파일·붙여넣기" 탭을 써 주세요.',true); return; }
@@ -214,7 +266,7 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
       var interim='';
       for(var i=e.resultIndex;i<e.results.length;i++){
         var r=e.results[i];
-        if(r.isFinal){ var ta=$('transcript'); ta.value += (ta.value && !/\s$/.test(ta.value) ? ' ':'') + r[0].transcript.trim() + ' '; refreshGo(); }
+        if(r.isFinal){ addText(r[0].transcript.trim()); }
         else interim += r[0].transcript;
       }
       $('interim').textContent = interim;
@@ -255,7 +307,7 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
       var t=String(rd.result||'');
       t=t.replace(/^WEBVTT.*$/mg,'').replace(/^\d+\s*$/mg,'')
          .replace(/^\d{1,2}:\d{2}[:.,\d]*\s*-->.*$/mg,'').replace(/\n{2,}/g,'\n').trim();
-      var ta=$('transcript'); ta.value=(ta.value?ta.value+'\n':'')+t; refreshGo(); say('');
+      var ta=$('transcript'); ta.value=(ta.value?ta.value+'\n':'')+t; refreshGo(); saveDraft(); say('');
       ta.scrollIntoView({behavior:'smooth',block:'center'});
     };
     rd.onerror=function(){say('파일을 읽지 못했어요.',true)};
@@ -263,15 +315,23 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
   });
 
   /* ---------- 정리하기 (Claude) ---------- */
-  function buildPrompt(){
+  var CHUNK=12000;   // 이보다 긴 글은 나눠서 1차 정리 후 합칩니다
+
+  function header(){
     var T=TYPES[state.type], who=$('who').value.trim(), why=$('why').value.trim();
-    var text=$('transcript').value.trim().slice(0,60000);
     return [
-      '아래는 사람이 나눈 대화를 음성 인식으로 받아 적은 글입니다. 글자 오류와 화자 구분 누락이 있을 수 있습니다.',
+      '아래는 사람이 나눈 대화(또는 강의)를 음성 인식으로 받아 적은 글입니다. 글자 오류와 화자 구분 누락이 있을 수 있습니다.',
       '대화 종류: '+T.label,
       who ? '상대: '+who : '',
       why ? '이 대화의 목적: '+why : '',
-      '',
+      '[나], ['+(who||'상대')+'] 같은 표시가 있으면 그 사람이 한 말입니다. 표시가 없으면 문맥으로 구분하되, 확실하지 않으면 단정하지 마세요.'
+    ].filter(Boolean).join('\n');
+  }
+
+  function buildPrompt(text){
+    var T=TYPES[state.type];
+    return [
+      header(), '',
       '규칙:',
       '- 대화에 실제로 나온 내용만 정리하세요. 없는 내용은 지어내지 말고 "언급 없음"이라고 쓰세요. (단, 항목에서 "(제안)" 표시를 허용한 곳만 예외)',
       '- 숫자·이름·날짜는 대화에 나온 그대로 쓰고, 인식 오류로 의심되면 뒤에 (?)를 붙이세요.',
@@ -283,7 +343,33 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
       '',
       '--- 대화 ---',
       text
-    ].filter(function(l){return l!==''||true}).join('\n');
+    ].join('\n');
+  }
+
+  function chunkPrompt(part, n, total){
+    var T=TYPES[state.type];
+    return [
+      header(), '',
+      '이 글은 긴 기록을 '+total+'조각으로 나눈 것 중 '+n+'번째 조각입니다.',
+      '나중에 아래 항목으로 최종 정리할 수 있도록, 이 조각에서 관련된 내용을 빠짐없이 메모하세요: '+T.sections.join(' / '),
+      '- 실제로 나온 내용만, 숫자·이름·날짜는 그대로 쓰세요.',
+      '- "- " 목록으로 짧게 쓰고, 마크다운 기호는 쓰지 마세요.',
+      '',
+      '--- 조각 ---',
+      part
+    ].join('\n');
+  }
+
+  function splitText(t){
+    var parts=[];
+    while(t.length > CHUNK){
+      var cutAt=-1, win=t.slice(0, CHUNK);
+      ['\n','. ','다. ','요. ','? ','! '].forEach(function(sep){ var k=win.lastIndexOf(sep); if(k>CHUNK*0.6 && k+sep.length>cutAt) cutAt=k+sep.length; });
+      if(cutAt<0) cutAt=CHUNK;
+      parts.push(t.slice(0,cutAt).trim()); t=t.slice(cutAt);
+    }
+    if(t.trim()) parts.push(t.trim());
+    return parts;
   }
 
   function renderResult(text){
@@ -309,12 +395,23 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
     $('go').disabled=true; $('go').textContent='정리하는 중…';
     state.ctrl=new AbortController();
     try{
-      var res=await sample(buildPrompt(),{
+      var text=$('transcript').value.trim(), parts=splitText(text);
+      if(parts.length>1){
+        var notes=[];
+        for(var n=0;n<parts.length;n++){
+          $('go').textContent='긴 기록 나눠 읽는 중… ('+(n+1)+'/'+parts.length+')';
+          var r=await sample(chunkPrompt(parts[n], n+1, parts.length),{cache:false, signal:state.ctrl.signal, modelTier:'default'});
+          notes.push('['+(n+1)+'번째 부분 메모]\n'+r.text);
+        }
+        text='(긴 기록을 부분별로 먼저 메모한 내용입니다)\n\n'+notes.join('\n\n');
+        $('go').textContent='최종 정리하는 중…';
+      }
+      var res=await sample(buildPrompt(text),{
         cache:false, signal:state.ctrl.signal, modelTier:'default',
         onText:function(o){ state.lastText=o.text; renderResult(o.text); }
       });
       state.lastText=res.text; renderResult(res.text);
-      saveHistory(res.text);
+      saveHistory(res.text); clearDraft();
       $('result').scrollIntoView({behavior:'smooth',block:'start'});
     }catch(err){
       if(err && err.text){ state.lastText=err.text; renderResult(err.text); }
@@ -357,7 +454,13 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
     var a; try{ a=JSON.parse(localStorage.getItem(KEY)||'[]'); }catch(_){ return []; }
     return a.map(function(it){ if(!TYPES[it.type]) it.type = it.type==='meeting' ? 'lecture' : 'bni'; return it; });
   }
-  function storeHist(a){ try{ localStorage.setItem(KEY, JSON.stringify(a.slice(0,50))); }catch(_){} }
+  function storeHist(a){
+    a=a.slice(0,200);
+    while(a.length){
+      try{ localStorage.setItem(KEY, JSON.stringify(a)); return; }
+      catch(_){ a.pop(); }   // 저장 공간이 꽉 차면 가장 오래된 기록부터 지움
+    }
+  }
   function saveHistory(result){
     var a=loadHist();
     a.unshift({id:Date.now(), type:state.type, who:$('who').value.trim(), why:$('why').value.trim(),
@@ -384,6 +487,55 @@ textarea{min-height:200px;resize:vertical;line-height:1.7}
       w.appendChild(o); w.appendChild(d); h.appendChild(w);
     });
   }
+  /* ---------- 표(CSV)로 내보내기 ---------- */
+  function splitResult(text, sections){
+    var cols=sections.map(function(){return ''});
+    String(text||'').split(/^■\s*/m).forEach(function(p){
+      if(!p.trim()) return;
+      var nl=p.indexOf('\n'), title=(nl<0?p:p.slice(0,nl)).trim(), body=(nl<0?'':p.slice(nl+1)).trim();
+      for(var i=0;i<sections.length;i++){
+        if(title===sections[i] || title.indexOf(sections[i].slice(0,6))===0){ cols[i]=body; return; }
+      }
+    });
+    return cols;
+  }
+  function csvCell(v){ v=String(v==null?'':v); return /[",\n\r]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v; }
+  $('csv').onclick=async function(){
+    var T=TYPES[state.type], rows=loadHist().filter(function(it){return it.type===state.type});
+    if(!rows.length){ say('"'+T.label+'" 기록이 아직 없어요. 위에서 종류를 바꿔 보세요.',true); $('msg').scrollIntoView({block:'center'}); return; }
+    var head=['날짜','상대','목적'].concat(T.sections.map(function(s){return s.replace(/\s*\(.*$/,'')}));
+    var lines=[head.map(csvCell).join(',')];
+    rows.forEach(function(it){
+      var d=new Date(it.at);
+      var ds=d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2);
+      lines.push([ds, it.who, it.why].concat(splitResult(it.result, T.sections)).map(csvCell).join(','));
+    });
+    var data='﻿'+lines.join('\r\n');   // ﻿: 엑셀에서 한글이 깨지지 않게
+    var fname=T.label.replace(/\s+/g,'_')+'_기록_'+new Date().toISOString().slice(0,10)+'.csv';
+    var dl=null; try{ dl=(window.claude&&window.claude.use)?await window.claude.use('downloads'):null }catch(_){}
+    try{
+      if(dl){ await dl.save({filename:fname, data:data}); }
+      else{
+        var a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([data],{type:'text/csv;charset=utf-8'}));
+        a.download=fname; document.body.appendChild(a); a.click(); a.remove();
+      }
+      say(rows.length+'건을 표로 저장했어요.');
+    }catch(err){ if(!err||err.code!=='declined') say('저장하지 못했어요.',true); }
+    $('msg').scrollIntoView({block:'center'});
+  };
+
+  /* ---------- 작성 중이던 내용 불러오기 ---------- */
+  (function(){
+    var d=null; try{ d=JSON.parse(localStorage.getItem(DRAFT)||'null'); }catch(_){}
+    if(!d || !d.transcript || !d.transcript.trim()) return;
+    if(TYPES[d.type]){
+      state.type=d.type;
+      Array.prototype.forEach.call(typesEl.children,function(c,i){c.setAttribute('aria-pressed',Object.keys(TYPES)[i]===d.type)});
+    }
+    $('who').value=d.who||''; $('why').value=d.why||''; $('transcript').value=d.transcript;
+    say('정리하기 전에 작성 중이던 내용을 불러왔어요. 이어서 녹음하거나 바로 정리할 수 있어요.');
+  })();
+
   renderHist(); refreshGo();
 })();
 </script>
