@@ -1,0 +1,15 @@
+{
+  "name": "받아쓰기 노트",
+  "short_name": "받아쓰기",
+  "description": "녹음 파일을 올리면 받아쓰기와 용도별 정리를 해 주는 개인용 앱",
+  "lang": "ko",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#2457c5",
+  "theme_color": "#2457c5",
+  "icons": [
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
